@@ -1,0 +1,209 @@
+configfile: "config.yaml"
+
+rule all:
+	input:
+		expand('clean/{sample}_R1_paired.fastq.gz', sample=config['samples']),
+		expand('clean/{sample}_R2_paired.fastq.gz', sample=config['samples']),
+		expand('fastqc/raw/{sample}_R1_fastqc.html', sample=config['samples']),
+		expand('fastqc/raw/{sample}_R2_fastqc.html', sample=config['samples']),
+		expand('fastqc/clean/{sample}_R1_paired_fastqc.html', sample=config['samples']),
+		expand('fastqc/clean/{sample}_R2_paired_fastqc.html', sample=config['samples']),
+		expand('stat/fastqc_stat.tsv'),
+		'trinity/Trinity.fasta',
+		'stat/assembly_report.txt',	
+		'trinity/Unigene.fasta',
+		expand('RSEM_{sample}',sample=config['samples']),
+		'RSEM/all_gene.isoform.counts.matrix',
+		'edgeR',
+		'anno/Trinity_anno.tsv',
+		'table/DEG_table.tsv',
+		'figure/PCA.pdf',
+		'figure/DEG_volcano_and_pie.pdf',
+		'figure/DEG_venn.pdf',
+		'figure/DEG_pheatmap.pdf',
+
+rule fastqc_raw_PE:
+	input:
+		config['path']+'/{sample}_R1.fastq.gz',
+		config['path']+'/{sample}_R2.fastq.gz'
+	output:
+		'fastqc/raw/{sample}_R1_fastqc.html',
+		'fastqc/raw/{sample}_R2_fastqc.html'
+	params:
+		conda = config['conda_path']
+	shell:
+		'{params.conda}/fastqc -t 2 -o fastqc/raw {input}'
+
+rule trimmomatic_PE:
+	input:
+		r1 = config['path']+'/{sample}_R1.fastq.gz',
+		r2 = config['path']+'/{sample}_R2.fastq.gz'
+	output:
+		r1_paired = 'clean/{sample}_R1_paired.fastq.gz',
+		r2_paired = 'clean/{sample}_R2_paired.fastq.gz',
+		r1_unpaired = 'clean/{sample}_R1_unpaired.fastq.gz',
+		r2_unpaired = 'clean/{sample}_R2_unpaired.fastq.gz'
+	params:
+		adapter = config['adapter'],
+		conda = config['conda_path']
+	shell:
+		'{params.conda}/trimmomatic PE -threads 3 -phred33 {input.r1} {input.r2} {output.r1_paired} {output.r1_unpaired} {output.r2_paired} {output.r2_unpaired} ILLUMINACLIP:{params.adapter}:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36'
+
+rule fastqc_clean_PE:
+	input:
+		'clean/{sample}_R1_paired.fastq.gz',
+		'clean/{sample}_R2_paired.fastq.gz'
+	output:
+		'fastqc/clean/{sample}_R1_paired_fastqc.html',
+		'fastqc/clean/{sample}_R2_paired_fastqc.html'
+	params:
+		conda = config['conda_path']
+	shell:
+		'{params.conda}/fastqc -t 2 -o fastqc/clean {input}'
+
+rule fastqc_stat_PE:
+	input:
+		['fastqc/raw/{sample}_R1_fastqc.html'.format(sample=x) for x in config['samples']],
+		['fastqc/raw/{sample}_R2_fastqc.html'.format(sample=x) for x in config['samples']],
+		['fastqc/clean/{sample}_R1_paired_fastqc.html'.format(sample=x) for x in config['samples']],
+		['fastqc/clean/{sample}_R2_paired_fastqc.html'.format(sample=x) for x in config['samples']]
+	output:
+		'stat/fastqc_stat.tsv'
+	params:
+		Rscript = config['Rscript_path']
+	shell:
+		'{params.Rscript} script/reads_stat_by_fastqcr.R'
+rule Trinity:
+	input:
+		R1=['clean/{sample}_R1_paired.fastq.gz'.format(sample=x) for x in config['samples']],
+		R2=['clean/{sample}_R2_paired.fastq.gz'.format(sample=x) for x in config['samples']]
+	output:
+		'trinity/Trinity.fasta'
+	params:
+		Trinity=config['trinity_path']
+	shell:
+		'{params.Trinity}/bin/Trinity --seqType fq --left {input.R1} --right {input.R2} --CPU  80 --max_memory 1024G --output trinity'
+
+rule assemble_stat:
+	input:
+		'trinity/Trinity.fasta'
+	output:
+		'stat/assembly_report.txt'
+	params:
+		Trinity=config['trinity_path']
+	shell:
+		'{params.Trinity}/bin/TrinityStats.pl {input} > {output}'
+rule get_unigene:
+	input:
+		'trinity/Trinity.fasta'
+	output:
+		'trinity/Unigene.fasta'
+	params:
+		Trinity=config['trinity_path']
+	shell:
+		'{params.Trinity}/opt/trinity-2.8.5/util/misc/get_longest_isoform_seq_per_trinity_gene.pl {input} > {output}'
+
+rule RSEM:
+	input:
+		gene='trinity/Unigene.fasta',
+		r1='clean/{sample}_R1_paired.fastq.gz',
+		r2='clean/{sample}_R2_paired.fastq.gz'
+	output:
+		dir='RSEM_{sample}',
+	params:
+		Trinity=config['trinity_path']
+	shell:
+		'{params.Trinity}/bin/align_and_estimate_abundance.pl --transcripts {input.gene} --seqType fq --left {input.r1} --right {input.r2} --est_method RSEM --aln_method bowtie --trinity_mode --prep_reference --output_dir {output.dir}'
+
+rule count:
+	input:
+		RSEM=['RSEM_{sample}/RSEM.genes.results'.format(sample=x) for x in config['samples']],
+		gt='trinity/Unigene.fasta.gene_trans_map'
+	output:
+		'RSEM/all_gene.isoform.counts.matrix'
+	params:
+		Trinity=config['trinity_path']
+	shell:
+		'{params.Trinity}/bin/abundance_estimates_to_matrix.pl --est_method RSEM --out_prefix all_gene --gene_trans_map {input.gt} --name_sample_by_basedir {input.RSEM}'
+
+rule DEG:
+	input:
+		mtx='RSEM/all_gene.isoform.counts.matrix',
+		samp='sap_fl.tsv',
+		cmp='design_table.tsv'
+	output:
+		'edgeR'
+	shell:
+		'run_DE_analysis.pl --min_reps_min_cpm 1 --matrix {input.mtx} --dispersion 0.1 --method edgeR --output {output} --samples_file {input.samp} --contrasts {input.cmp}'
+
+rule trinotate:
+	input:
+		'trinity/Unigene.fasta',
+	output:
+		'anno/blastx.outfmt6',
+	params:
+		uniprot=config['uniprot'],
+	shell:
+		'blastx -query {input} -db {params.uniprot} -num_threads 60 -max_target_seqs 1 -outfmt 6 > {output}'
+
+rule anno_fl:
+	input:
+		'anno/blastx.outfmt6',
+	output:
+		'anno/Trinity_anno.tsv'
+	params:
+		Upt_N=config['Uniprot_name']
+	shell:
+		'cut -f 1,2  {input}|./script/csvtk join -f "2;1" -{ params.Upt_N} -t -H > {output}'
+
+rule DEG_tbl:
+	input:
+		anno='anno/Trinity_anno.tsv',
+		TMM="RSEM/all_gene.isoform.TMM.EXPR.matrix"
+	output:
+		'table/DEG_table.tsv'
+	params:
+		Rscript = config['Rscript_path']
+	shell:
+		'{params.Rscript} script/DEG_table.R {input.TMM} {input.anno} {output}'
+
+rule PCA:
+	input:
+		cpm_all = 'RSEM/all_gene.isoform.TMM.EXPR.matrix'
+	output:
+		pca_output = 'figure/PCA.pdf'
+	params:
+		config_file = 'config.yaml',
+		Rscript = config['Rscript_path']
+	shell:
+		'{params.Rscript} script/PCA.R {params.config_file} {input} {output}'
+
+rule volcano:
+	input:
+		'table/DEG_table.tsv'
+	output:
+		'figure/DEG_volcano_and_pie.pdf'
+	params:
+		Rscript = config['Rscript_path']
+	shell:
+		'{params.Rscript} script/DEG_volcano_and_pie.R {input} {output}'
+
+rule venn:
+	input:
+		'table/DEG_table.tsv'
+	output:
+		'figure/DEG_venn.pdf'
+	params:
+		Rscript = config['Rscript_path']
+	shell:
+		'{params.Rscript} script/DEG_venn.R {input} {output}'
+
+rule pheatmap:
+	input:
+		'table/DEG_table.tsv'
+	output:
+		'figure/DEG_pheatmap.pdf'
+	params:
+		Rscript = config['Rscript_path']
+	shell:
+		'{params.Rscript} script/DEG_pheatmap.R {input} {output}'
