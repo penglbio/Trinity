@@ -1,4 +1,4 @@
-# RNA-Seq Workflow Tutorial
+# Denove RNA-Seq Workflow Tutorial(Trinity)
 
 ### 1. Make project directory
 ```
